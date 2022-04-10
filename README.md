@@ -2,7 +2,7 @@
 
 Collecting public data from the app stores.
 
-![AWS Architecture Diagram](doc/AWS Architecture Diagram.png)
+![AWS Architecture Diagram](./doc/AWS Architecture Diagram.png)
 
 ### Deployment
 
