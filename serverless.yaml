@@ -1,0 +1,168 @@
+service: app-rank
+
+provider:
+  name: aws
+  runtime: python3.6
+  region: eu-central-1
+  timeout: 300
+  versionFunctions: false
+  role: !GetAtt LambdaRole.Arn
+
+functions:
+  main:
+    memorySize: 1024
+    handler: handler.main
+    environment:
+      Countries: "NL DE"
+      RootAddress: "https://play.google.com/store/apps/top?gl={}"
+      QueueUrl: !Ref SagaQueue
+      BucketName: ${self:service}-storage
+    events:
+      - schedule: cron(0 0 ? * MON-FRI *) # At 00:00 on every day-of-week from Monday through Friday
+    layers:
+      - arn:aws:lambda:eu-central-1:586033667147:layer:chromedriver:1
+      - arn:aws:lambda:eu-central-1:586033667147:layer:selenium:1
+
+  SQSTrigger:
+    handler: crawler.main
+    name: ${self:service}-sqs-trigger
+    description: "SQS trigger"
+    timeout: 900
+    memorySize: 1024
+    environment:
+      CategoryAddress: "https://play.google.com/store/apps/category/{}?gl={}"
+      BucketName: ${self:service}-storage
+      Firehose: ${self:service}-firehose
+    events:
+      - sqs:
+          batchSize: 1
+          arn: !GetAtt SagaQueue.Arn
+    layers:
+      - arn:aws:lambda:eu-central-1:586033667147:layer:chromedriver:1
+      - arn:aws:lambda:eu-central-1:586033667147:layer:selenium:1
+
+resources:
+  Resources:
+    # REF: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-sqs-queues.html
+    SagaQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-saga-queue
+        MessageRetentionPeriod: 14400 # 4 Hours
+        VisibilityTimeout: 900 # 15 Minutes
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+          maxReceiveCount: 3 # When the ReceiveCount for a message exceeds the maxReceiveCount for a queue,
+                             # Amazon SQS moves the message to a dead-letter queue
+
+    DeadLetterQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-dead-letter-queue
+        MessageRetentionPeriod: 345600 # 4 Days
+
+    # REF: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-sns-topic.html
+    AlarmTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-alarm-topic
+        Subscription:
+          -
+            Endpoint: "erginakin@gmail.com"
+            Protocol: "email"
+
+    DeadLetterArrivalAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName : ${self:service}-dead-letter-arrival-alarm
+        AlarmDescription: "Alarm if a message arrives at dead letter queue"
+        Namespace: "AWS/SQS"
+        MetricName: "NumberOfMessagesReceived"
+        Dimensions:
+          -
+            Name: "QueueName"
+            Value: !GetAtt SagaQueue.QueueName
+        Statistic: "Sum"
+        Period: "300"
+        EvaluationPeriods: "1"
+        Threshold: "1"
+        ComparisonOperator: "GreaterThanThreshold"
+        AlarmActions:
+          -
+            Ref: "AlarmTopic"
+        InsufficientDataActions:
+          -
+            Ref: "AlarmTopic"
+
+    # Creates a role that allows Lambda to reach AWS resources
+    LambdaRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        RoleName: ${self:service}-lambda-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service:
+                  - "lambda.amazonaws.com"
+                  - "firehose.amazonaws.com"
+              Action:
+                - "sts:AssumeRole"
+        Policies:
+          - PolicyName: "AppRankLambdaPolicy"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - lambda:CreateEventSourceMapping
+                    - lambda:ListEventSourceMappings
+                    - lambda:ListFunctions
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action: "logs:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action: "sqs:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action: "s3:*"
+                  Resource: "*"
+                - Effect: Allow
+                  Action: "firehose:*"
+                  Resource: "*"
+                - Effect: Allow
+                  Resource: "*"
+                  Action: "sts:AssumeRole"
+
+    RanksBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        AccessControl: Private
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: "AES256"
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketName: ${self:service}-storage
+        VersioningConfiguration:
+          Status: Suspended
+
+    Firehose:
+      DependsOn: RanksBucket
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        DeliveryStreamName: ${self:service}-firehose
+        S3DestinationConfiguration:
+          BucketARN: !GetAtt RanksBucket.Arn
+          BufferingHints:
+            IntervalInSeconds: 300
+            SizeInMBs: 5
+          CompressionFormat: UNCOMPRESSED
+          Prefix: ranks/
+          RoleARN: !GetAtt LambdaRole.Arn
