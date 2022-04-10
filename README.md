@@ -5,7 +5,7 @@
 
 Collecting public data from the app stores.
 
-![AWS Architecture Diagram](AWS Architecture Diagram.png)
+![AWS Architecture Diagram](architecture_diagram.png)
 
 ### Quick Start
 
